@@ -1,0 +1,91 @@
+This guide provides the exact commands used to configure Intel iGPU SR-IOV on the Proxmox host, grouped for easy execution in the shell.
+
+1. Preparation and Package Installation
+
+First, run the community post-install script (Line 1), then install all necessary build tools and dependencies (Lines 2, 10).
+
+# Execute the external post-install script (Line 1)
+bash -c "$(curl -fsSL [https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/tools/pve/post-pve-install.sh](https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/tools/pve/post-pve-install.sh))"
+
+# Install essential packages for building DKMS modules and diagnostics (Lines 2, 10, 33)
+apt update
+apt install git sysfsutils pve-headers mokutil build-essential dkms intel-gpu-tools -y
+
+
+2. Cleanup and Custom i915 DKMS Driver Installation
+
+Remove previous attempts and install the SR-IOV-enabled i915 driver (Lines 3-6, 9, 11-18).
+
+# Cleanup old/conflicting i915 modules (Lines 3-6)
+rm -rf /usr/src/i915-sriov-dkms-*
+rm -rf /var/lib/dkms/i915-sriov-dkms
+rm -rf ~/i915-sriov-dkms*
+find /lib/modules -regex ".*/updates/dkms/i915.ko" -delete
+
+# Clone the custom SR-IOV driver repository (Line 9)
+git clone [https://github.com/strongtz/i915-sriov-dkms.git](https://github.com/strongtz/i915-sriov-dkms.git)
+
+# Add and install the DKMS module (Lines 11-17)
+cd ~/i915-sriov-dkms
+dkms add .
+# The module name is derived by DKMS; this forces compilation and install for all kernels.
+dkms install -m i915-sriov-dkms --force
+
+
+3. Host System Configuration and Activation
+
+Configure IOMMU, set the number of Virtual Functions (VFs), and apply changes (Lines 19-23).
+
+Step 3a: Edit Kernel Command Line
+
+ACTION REQUIRED: Use nano /etc/kernel/cmdline to edit the file and ensure it contains the necessary boot parameters.
+
+# FINAL CONTENT FOR /etc/kernel/cmdline:
+root=ZFS=rpool/ROOT/pve-1 boot=zfs intel_iommu=on iommu=pt i915.enable_guc=3 i915.max_vfs=7 i915.modeset=1
+
+
+Step 3b: Apply Configuration Changes
+
+# Apply the changes to the bootloader (Line 20)
+proxmox-boot-tool refresh
+
+# Configure 7 Virtual Functions (VFs) for the iGPU at boot (Line 22)
+echo "devices/pci0000:00/0000:00:02.0/sriov_numvfs = 7" > /etc/sysfs.conf
+
+# Update the initial ramdisk (initramfs) for all kernels (Line 23)
+update-initramfs -u -k all
+
+# Pin the current working kernel version to prevent future breakage (Line 84)
+# This assumes 6.17.2-1-pve is the desired kernel.
+proxmox-boot-tool kernel pin 6.17.2-1-pve
+
+
+4. Reboot and Verification
+
+Reboot the server to load the new kernel and custom module, then check the status.
+
+# Reboot the host (Line 24)
+reboot now
+
+# After reboot, verify VFs were created (Line 25)
+lspci | grep VGA
+# You should see the Physical Function (00:02.0) and 7 VFs (00:02.1 through 00:02.7).
+
+# Check kernel messages for i915 status (Line 26)
+dmesg | grep i915
+
+
+5. VM Configuration (Manual Step)
+
+For each Virtual Machine (VM 100, 101, etc.) that needs a dedicated GPU:
+
+Edit the VM configuration file (/etc/pve/qemu-server/VMID.conf).
+
+Add a unique VF device and disable the virtual VGA.
+
+Example for VM 100:
+
+hostpci0: 0000:00:02.1  # Use the first VF
+vga: none
+machine: q35
+bios: ovmf
